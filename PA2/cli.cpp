@@ -35,22 +35,26 @@ struct line {
 // Opening a pipe is not in the Critical Section of the thread function.
 void listener(int pipe_out)
 {
-    thread_mutex.lock();
     std::thread::id this_id = std::this_thread::get_id();
 
-    const size_t bufferSize = 256;
+    const size_t bufferSize = 1024;
     char buffer[bufferSize];
+    setvbuf(stdout, buffer, _IOFBF, 1024);
+
     ssize_t bytesRead;
 
-    cout << "----" << this_id;
+    std::stringstream dataStream;
 
-    while ((bytesRead = read(pipe_out, buffer, bufferSize - 1)) > 0)
-    {
-        buffer[bytesRead] = '\0'; // Null-terminate the string
-        std::cout << buffer << std::endl;
-    }
+    bytesRead = read(pipe_out, buffer, bufferSize - 1);
+    buffer[bytesRead] = '\0'; // Null-terminate the string
+    dataStream << buffer; // Accumulate the data
 
-    cout << "----" << this_id;
+    // CRITICAL SECTION OF THE THREAD.
+    thread_mutex.lock();
+    cout << "----" << this_id << endl;
+    std::cout << dataStream.str();
+    cout << "----" << this_id << endl;
+    fflush(stdout);
     thread_mutex.unlock();
 }
 
@@ -249,9 +253,6 @@ int main()
     // This is where the commands are fetched.
     while ((rc != 0) && getline(commandFile, line))
     {
-        flag = 0;
-
-        // This is a very special situation. We have to wait for all the active processes to finish.
         if (line == "wait")
         {
             Wait(pidArr);
@@ -259,9 +260,6 @@ int main()
 
         else
         {
-            // This is the place where we handle everything.
-            // A lot of things will happen here.
-
             struct line command = parser(line);
 
             parse_txt << "---------" << endl;
@@ -272,17 +270,13 @@ int main()
             parse_txt << "Background Job: " << command.background_job << endl;
             parse_txt << "----------" << endl;
 
-            // The threads should be lifted from the
-            // Spin condition.
             if (!command.isRedirected)
             {
-                // J'ai eu mon attestation du français recemment.
                 int pneu[2];
                 pipe(pneu);
 
                 rc = fork();
 
-                // Checking whether I am in child process or not.
                 if (rc == 0)
                 {
                     close(STDOUT_FILENO);
@@ -293,10 +287,13 @@ int main()
                     vector<string> argv;
 
                     argv.push_back(command.command);
-                    argv.push_back(command.options);
 
                     if (!command.inputs.empty()) {
                         argv.push_back(command.inputs);
+                    }
+
+                    if (!command.options.empty()){
+                        argv.push_back(command.options);
                     }
 
                     char** args = new char*[argv.size() + 1];
@@ -312,11 +309,12 @@ int main()
 
                 else
                 {
-                    thread thr(&listener, pneu[0]);
+                    (new thread(&listener, pneu[0]))->detach();
 
                     if (command.background_job == "n")
                     {
-                        wait(nullptr);
+                        int status;
+                        waitpid(rc, &status, 0);
                     }
 
                     else
@@ -329,27 +327,42 @@ int main()
             // Process interleaving is left to the OS
             else
             {
-                // J'ai eu mon attestation du français recemment.
-                int pneu[2];
-                pipe(pneu);
-
-                int rc = fork();
-
                 // Checking whether I am in child process or not.
-                if (rc == 0)
-                {
+                if (command.redirection == "<") {
+                    int pneu[2];
+                    pipe(pneu);
 
-                    if (command.redirection == "<") {
+                    int rc = fork();
+                    if (rc == 0)
+                    {
+                        int fd = open(command.redirectFile.c_str(), O_RDONLY);
+                        if (fd < 0) {
+                            perror("open");
+                            exit(EXIT_FAILURE);
+                        }
+
+                        // Redirect standard input to the file
+                        dup2(fd, STDIN_FILENO);
+                        close(fd);
+
+                        close(STDOUT_FILENO);
+                        close(pneu[0]);
+                        dup(pneu[1]);
+                        close(pneu[1]);
+
                         vector<string> argv;
 
                         argv.push_back(command.command);
-                        argv.push_back(command.options);
 
                         if (!command.inputs.empty()) {
                             argv.push_back(command.inputs);
                         }
 
-                        char** args = new char*[argv.size() + 1];
+                        if (!command.options.empty()){
+                            argv.push_back(command.options);
+                        }
+
+                        char **args = new char *[argv.size() + 1];
 
                         for (size_t i = 0; i < argv.size(); ++i) {
                             args[i] = strdup(argv[i].c_str());
@@ -357,49 +370,57 @@ int main()
 
                         args[argv.size()] = nullptr;
 
-                        pid_t pid = fork();
+                        // Execute the command
+                        execvp(args[0], args);
 
-                        if (pid == 0) { // Child process
-                            // Open the file for input redirection
-                            int fd = open(command.redirectFile.c_str(), O_RDONLY);
-                            if (fd < 0) {
-                                perror("open");
-                                exit(EXIT_FAILURE);
-                            }
-
-                            // Redirect standard input to the file
-                            dup2(fd, STDIN_FILENO);
-                            close(fd);
-
-                            // Execute the command
-                            execvp(args[0], args);
-
-                            // If execvp returns, there was an error
-                            perror("execvp");
-                            exit(EXIT_FAILURE);
-                        } else if (pid > 0) { // Parent process
-                            // Optionally wait for the child process to finish
-                            waitpid(pid, NULL, 0);
-                        } else {
-                            perror("fork");
-                        }
-
-                        // Free the dynamically allocated memory
-                        for (size_t i = 0; i < argv.size(); ++i) {
-                            free(args[i]);
-                        }
-                        delete[] args;
+                        // If execvp returns, there was an error
+                        perror("execvp");
+                        exit(EXIT_FAILURE);
                     }
 
                     else
                     {
+                        (new thread(&listener, pneu[0]))->detach();
+
+                        if (command.background_job == "n")
+                        {
+                            int status;
+                            waitpid(rc, &status, 0);
+                        }
+
+                        else
+                        {
+                            pidArr.push_back(rc);
+                        }
+                    }
+                }
+
+                else
+                {
+                    int rc = fork();
+
+                    if (rc == 0)
+                    {
+                        int fd = open(command.redirectFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                        if (fd < 0) {
+                            perror("open");
+                            exit(EXIT_FAILURE);
+                        }
+
+                        // Redirect standard output to the file
+                        dup2(fd, STDOUT_FILENO);
+                        close(fd);
+
                         vector<string> argv;
 
                         argv.push_back(command.command);
-                        argv.push_back(command.options);
 
                         if (!command.inputs.empty()) {
                             argv.push_back(command.inputs);
+                        }
+
+                        if (!command.options.empty()){
+                            argv.push_back(command.options);
                         }
 
                         char** args = new char*[argv.size() + 1];
@@ -410,44 +431,27 @@ int main()
 
                         args[argv.size()] = nullptr;
 
-                        pid_t pid = fork();
+                        // Execute the command
+                        execvp(args[0], args);
 
-                        if (pid == 0) { // Child process
-                            // Open the file for output redirection
-                            int fd = open(command.redirectFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                            if (fd < 0) {
-                                perror("open");
-                                exit(EXIT_FAILURE);
-                            }
-
-                            // Redirect standard output to the file
-                            dup2(fd, STDOUT_FILENO);
-                            close(fd);
-
-                            // Execute the command
-                            execvp(args[0], args);
-
-                            // If execvp returns, there was an error
-                            perror("execvp");
-                            exit(EXIT_FAILURE);
-                        } else if (pid > 0) { // Parent process
-                            // Optionally wait for the child process to finish
-                            waitpid(pid, NULL, 0);
-                        } else {
-                            perror("fork");
-                        }
-
-                        // Free the dynamically allocated memory
-                        for (size_t i = 0; i < argv.size(); ++i) {
-                            free(args[i]);
-                        }
-                        delete[] args;
+                        // If execvp returns, there was an error
+                        perror("execvp");
+                        exit(EXIT_FAILURE);
                     }
-                }
 
-                else if (command.background_job == "n")
-                {
-                    wait(nullptr);
+                    else
+                    {
+                        if (command.background_job == "n")
+                        {
+                            int status;
+                            waitpid(rc, &status, 0);
+                        }
+
+                        else
+                        {
+                            pidArr.push_back(rc);
+                        }
+                    }
                 }
             }
         }
