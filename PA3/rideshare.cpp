@@ -1,97 +1,134 @@
 #include <iostream>
 #include <pthread.h>
 #include <vector>
-#include <semaphore.h>
+#include <unistd.h>
 using namespace std;
 
+pthread_mutex_t lock;
+pthread_barrier_t barrier;
 pthread_mutex_t cout_mutex;
-sem_t teamA_sem, teamB_sem; // Semaphores for team A and B
-int teamA_count = 0, teamB_count = 0; // Counters for team members
-int carID = 0; // Car ID assignment
 
-typedef struct car_ 
-{
-    unsigned long int carID = 0;
-    sem_t seats;
-    int teamA_count;
-    pthread_mutex_t team_a_increment;
-    int teamB_count;
-    pthread_mutex_t team_b_increment;
-} car ;
+static unsigned long int carID = 0;
 
-void* teamA_thread(void* arg) 
-{
-    vector<car>* cars = (vector<car>*)arg;
+typedef struct __thread_args_ {
+    char team;
+} thread_args;
+
+// I am using Dijkstra Semaphores.
+typedef struct semaphore {
+    pthread_mutex_t s_lock;
+    pthread_cond_t cond;
+    int s_value;
+} sem_t;
+
+void sem_init(sem_t *sem, int val) {
+    pthread_mutex_init(&sem->s_lock, NULL);
+    pthread_cond_init(&sem->cond, NULL);
+    sem->s_value = val;
+}
+
+void sem_post(sem_t *sem) {
+    pthread_mutex_lock(&sem->s_lock);
+    sem->s_value++;
+    pthread_cond_signal(&sem->cond);
+    pthread_mutex_unlock(&sem->s_lock);
+}
+
+void sem_wait(sem_t *sem) {
+    pthread_mutex_lock(&sem->s_lock);
+    sem->s_value--;
+    pthread_mutex_unlock(&lock);
+    if (sem->s_value < 0) {
+        pthread_cond_wait(&sem->cond, &sem->s_lock);
+    }
+    pthread_mutex_unlock(&sem->s_lock);
+}
+
+sem_t sem_A, sem_B;
+sem_t *sem_T, *sem_O;
+
+void* fan_threads(void *argc) {
+    bool driver = false;
+    auto *args = static_cast<thread_args*>(argc);
+
+    // CRITICAL SECTION
+    pthread_mutex_lock(&lock);
 
     pthread_mutex_lock(&cout_mutex);
-    cout << "Thread ID: " << pthread_self() << ", Team: A, I am looking for a car." << endl;
+    cout << "Thread ID " << pthread_self() << " Team: " << args->team << ", I am looking for a car" << endl;
     pthread_mutex_unlock(&cout_mutex);
+    fsync(STDOUT_FILENO);
 
-    for (auto& c : *cars) {
-        if (sem_trywait(&c.seats) == 0) 
+    if (args->team == 'A')
+    {
+        sem_T = &sem_A;
+        sem_O = &sem_B;
+    }
+
+    else
+    {
+        sem_T = &sem_B;
+        sem_O = &sem_A;
+    }
+
+    int val_T = sem_T->s_value;
+    int val_O = sem_O->s_value;
+
+    if(val_T < 0 && val_O < -1)
+    {
+        driver = true;
+        sem_post(sem_T);
+
+        for (int i = 0; i < 2; i++)
         {
-            pthread_mutex_lock(&c.team_a_increment);
-            if (c.teamB_count == 0 || c.teamA_count >= c.teamB_count) 
-            {
-                c.teamA_count++;
-                if (c.teamA_count + c.teamB_count = 4)
-                {
-                    cout << "Thread ID: " << pthread_self() << ", Team: A, I have found a spot in a car with ID " << c.carID << endl;
-                    cout << "Thread ID: " << pthread_self() << ", Team: A, I am the captain and driving the car" << endl;
-                }
-                cout << "Thread ID: " << pthread_self() << ", Team: A, I have found a spot in a car" << endl;
-                pthread_mutex_unlock(&c.team_a_increment);
-                break;
-            }
-            pthread_mutex_unlock(&c.team_a_increment);
-            sem_post(&c.seats);
+            sem_post(sem_O);
         }
     }
 
-    return nullptr;
-}
+    else if(val_T < -2)
+    {
+        driver = true;
 
-void* teamB_thread(void* arg) 
-{
-    vector<car>* cars = (vector<car>*)arg;
-
-    pthread_mutex_lock(&cout_mutex);
-    cout << "Thread ID: " << pthread_self() << ", Team: B, I am looking for a car." << endl;
-    pthread_mutex_unlock(&cout_mutex);
-
-    for (auto& c : *cars) {
-        if (sem_trywait(&c.seats) == 0) 
+        for (int i = 0; i < 3; i++)
         {
-            pthread_mutex_lock(&c.team_b_increment);
-            if (c.teamA_count == 0 || c.teamB_count > c.teamA_count) 
-            {
-                c.teamB_count++;
-                if (c.teamA_count + c.teamB_count == 4)
-                {
-                    pthread_mutex_lock(&cout_mutex);
-                    cout << "Thread ID: " << pthread_self() << ", Team: B, I have found a spot in a car with ID " << c.carID << endl;
-                    cout << "Thread ID: " << pthread_self() << ", Team: B, I am the captain and driving the car" << endl;
-                    pthread_mutex_unlock(&cout_mutex);
-                }
-                else
-                {
-                    pthread_mutex_lock(&cout_mutex);
-                    cout << "Thread ID: " << pthread_self() << ", Team: B, I have found a spot in a car" << endl;
-                    pthread_mutex_unlock(&cout_mutex);
-                }
-                pthread_mutex_unlock(&c.team_b_increment);
-                break;
-            }
-            pthread_mutex_unlock(&c.team_b_increment);
-            sem_post(&c.seats);
+            sem_post(sem_T);
         }
     }
 
+    else
+    {
+        sem_wait(sem_T);
+    }
+
+    pthread_mutex_lock(&cout_mutex);
+    cout << "Thread ID " << pthread_self() << " Team: " << args->team << ", I have found a spot in a car" << endl;
+    fsync(STDOUT_FILENO);
+    pthread_mutex_unlock(&cout_mutex);
+
+    pthread_barrier_wait(&barrier);
+
+    if (driver)
+    {
+        pthread_mutex_lock(&cout_mutex);
+        cout << "Thread ID " << pthread_self() << " Team: " << args->team << ", I am the captain and driving the car with ID " << carID << endl;
+        fsync(STDOUT_FILENO);
+        pthread_mutex_unlock(&cout_mutex);
+
+        // New Car Creation
+        pthread_barrier_destroy(&barrier);
+        pthread_barrier_init(&barrier, nullptr, 4);
+        pthread_mutex_unlock(&lock);
+        carID++;
+    }
+
+    delete args;
     return nullptr;
 }
 
-int main(int argc, char *argv[]) {
-    if (argc != 3) {
+int main(int argc, char* argv[]){
+
+    if (argc != 3)
+    {
         cerr << "Usage: " << argv[0] << " <num_teamA> <num_teamB>" << endl;
         return 1;
     }
@@ -99,52 +136,36 @@ int main(int argc, char *argv[]) {
     int num_teamA = stoi(argv[1]);
     int num_teamB = stoi(argv[2]);
 
-    if ((num_teamA % 2 != 0) || (num_teamB % 2 != 0) || ((num_teamA + num_teamB) % 4 != 0)) {
+    if ((num_teamA % 2 != 0) || (num_teamB % 2 != 0) || ((num_teamA + num_teamB) % 4 != 0))
+    {
         cerr << "Error: Invalid number of team members." << endl;
         return 1;
     }
-    
-    // Car Array
-    int car_count = (num_teamA + num_teamB) / 4;
-    vector<car> cars(car_count);
 
-    // Initialize mutex and semaphores
+    pthread_mutex_init(&lock, nullptr);
     pthread_mutex_init(&cout_mutex, nullptr);
+    pthread_barrier_init(&barrier, nullptr, 4);
 
-    for (int i = 0; i < car_count; i++) {
-        cars[i].carID = i;
-        sem_init(&(cars[i].seats), 0, 4); // Initialize semaphore with 4 seats per car
-        pthread_mutex_init(&(cars[i].team_a_increment), nullptr);
-        pthread_mutex_init(&(cars[i].team_b_increment), nullptr);
-    }
+    sem_init(&sem_A, 0);
+    sem_init(&sem_B, 0);
 
-    // Vectors for threads
-    vector<pthread_t> teamA_threads(num_teamA);
-    vector<pthread_t> teamB_threads(num_teamB);
+    vector<pthread_t> threads(num_teamA + num_teamB);
 
-    // Create threads for Team A and Team B
-    for (int i = 0; i < num_teamA; ++i) {
-        pthread_create(&teamA_threads[i], nullptr, teamA_thread, (void*)&cars);
-    }
-    for (int i = 0; i < num_teamB; ++i) {
-        pthread_create(&teamB_threads[i], nullptr, teamB_thread, (void*)&cars);
+    // Even amount of threads are present.
+    for (int i = 0; i < num_teamA + num_teamB; ++i)
+    {
+        auto *arg = new thread_args;
+        arg->team = (i % 2 == 0) ? 'A' : 'B';
+        pthread_create(&threads[i], nullptr, fan_threads, arg);
     }
 
     // Join all threads
-    for (auto& thread : teamA_threads) {
-        pthread_join(thread, nullptr);
-    }
-    for (auto& thread : teamB_threads) {
+    for (auto& thread : threads) {
         pthread_join(thread, nullptr);
     }
 
-    // Cleanup: Destroy semaphores and mutexes
-    for (auto& c : cars) {
-        sem_destroy(&c.seats);
-        pthread_mutex_destroy(&c.team_a_increment);
-        pthread_mutex_destroy(&c.team_b_increment);
-    }
-    pthread_mutex_destroy(&cout_mutex);
+    pthread_barrier_destroy(&barrier);
+    pthread_mutex_destroy(&lock);
 
     cout << "The main terminates" << endl;
     return 0;
