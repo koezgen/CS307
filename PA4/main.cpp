@@ -9,28 +9,32 @@ using namespace std;
 void* threadfunc1(void* arg)
 {
     auto* memory = static_cast<HeapManager*>(arg);
-    memory->myMalloc(pthread_self(), 10);
+    auto addr = memory->myMalloc(pthread_self(), 10);
+    memory->myFree(pthread_self(), addr);
     return nullptr;
 }
 
 void* threadfunc2(void* arg)
 {
     auto* memory = static_cast<HeapManager*>(arg);
-    memory->myMalloc(pthread_self(), 20);
+    auto addr = memory->myMalloc(pthread_self(), 20);
+    memory->myFree(pthread_self(), addr);
     return nullptr;
 }
 
 void* threadfunc3(void* arg)
 {
     auto* memory = static_cast<HeapManager*>(arg);
-    memory->myMalloc(pthread_self(), 35);
+    auto addr = memory->myMalloc(pthread_self(), 35);
+    memory->myFree(pthread_self(), addr);
     return nullptr;
 }
 
 void* threadfunc4(void* arg)
 {
     auto* memory = static_cast<HeapManager*>(arg);
-    memory->myMalloc(pthread_self(), 40);
+    auto addr = memory->myMalloc(pthread_self(), 35);
+    memory->myFree(pthread_self(), addr);
     return nullptr;
 }
 

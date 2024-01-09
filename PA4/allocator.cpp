@@ -13,6 +13,7 @@ struct Node {
     unsigned int SIZE;
     unsigned int INDEX;
     Node* next;
+    Node* prev;
 };
 
 
@@ -62,6 +63,8 @@ void HeapManager::print()
             cout << "---";
             iter = iter->next;
         }
+
+        else break;
     }
 
     cout << endl;
@@ -76,7 +79,7 @@ int HeapManager::myMalloc(int tid, int size)
     Node* iter = MEMORY;
     while (iter != nullptr)
     {
-        if (iter->SIZE >= size)
+        if ((iter->ID == -1) && (iter->SIZE >= size))
         {
             Node* temp = iter->next;
             Node* alloc = new Node(iter->ID, iter->SIZE - size, iter->INDEX + size);
@@ -85,8 +88,19 @@ int HeapManager::myMalloc(int tid, int size)
 
             iter->next = alloc;
             alloc->next = temp;
+            alloc->prev = iter;
 
-            return 0;
+            if (alloc->SIZE == 0)
+            {
+                iter->next = nullptr;
+                delete alloc;
+            }
+
+            cout << "Allocated for thread " << tid << endl;
+            fsync(STDOUT_FILENO);
+            print();
+            pthread_mutex_unlock(&MUTEX);
+            return iter->INDEX;
         }
 
         else if (iter->next != nullptr)
@@ -96,26 +110,198 @@ int HeapManager::myMalloc(int tid, int size)
 
         else
         {
-            cout << "Can not allocate, requested size " << size << "for thread " << tid << " is bigger than remaining size" << endl;
+            cout << "Can not allocate, requested size " << size << " for thread " << tid << " is bigger than remaining size" << endl;
             fsync(STDOUT_FILENO);
             print();
             pthread_mutex_unlock(&MUTEX);
             return -1;
         }
     }
+
     fsync(STDOUT_FILENO);
     pthread_mutex_unlock(&MUTEX);
     return 0;
 }
 
+int dec_var(Node* p, Node* n)
+{
+    if ((p == nullptr) && (n == nullptr))
+    {
+        return 0;
+    }
+
+    else if ((p == nullptr) && (n != nullptr))
+    {
+        return 1;
+    }
+
+    else if ((p != nullptr) && (n == nullptr))
+    {
+        return 2;
+    }
+
+    else if ((p->ID != -1) && (n->ID != -1))
+    {
+        return 3;
+    }
+
+    else if ((p->ID != -1) && (n->ID == -1))
+    {
+        return 4;
+    }
+
+    else if ((p->ID == -1) && (n->ID != -1))
+    {
+        return 5;
+    }
+
+    else if ((p->ID == -1) && (n->ID == -1))
+    {
+        return 6;
+    }
+}
+
 // TODO: NEED TO IMPLEMENT
-int HeapManager::myFree(int ID, int index)
+int HeapManager::myFree(int tid, int index)
 {
     pthread_mutex_lock(&MUTEX);
-    cout << "Memory Free " << ID << " and " << index << endl;
+
+    Node* iter = MEMORY;
+    while (iter != nullptr)
+    {
+        if ((iter->ID == tid) && (iter->INDEX == index))
+        {
+            Node* previous = iter->prev;
+            Node* next = iter->next;
+
+            // There are 4 cases for coalescence.
+            switch (dec_var(previous, next))
+            {
+                // Both sides are NULL
+                case 0:
+                    iter->ID = -1;
+                    cout << "Freed for thread " << tid << endl;
+                    fsync(STDOUT_FILENO);
+                    print();
+                    pthread_mutex_unlock(&MUTEX);
+                    return 1;
+
+                // Left side is NULL
+                case 1:
+                    if (next->ID != -1)
+                    {
+                        iter->ID = -1;
+                        cout << "Freed for thread " << tid << endl;
+                        fsync(STDOUT_FILENO);
+                        print();
+                        pthread_mutex_unlock(&MUTEX);
+                        return 1;
+                    }
+
+                    else
+                    {
+                        next->SIZE += iter->SIZE;
+                        next->INDEX = iter->INDEX;
+                        next->prev = nullptr;
+                        delete iter;
+                        MEMORY = next;
+                        cout << "Freed for thread " << tid << endl;
+                        fsync(STDOUT_FILENO);
+                        print();
+                        pthread_mutex_unlock(&MUTEX);
+                        return 1;
+                    }
+
+                // Right side is NULL
+                case 2:
+                    if (previous->ID != -1)
+                    {
+                        iter->ID = -1;
+                        cout << "Freed for thread " << tid << endl;
+                        fsync(STDOUT_FILENO);
+                        print();
+                        pthread_mutex_unlock(&MUTEX);
+                        return 1;
+                    }
+
+                    else
+                    {
+                        previous->SIZE += iter->SIZE;
+                        previous->next = nullptr;
+                        delete iter;
+                        cout << "Freed for thread " << tid << endl;
+                        fsync(STDOUT_FILENO);
+                        print();
+                        pthread_mutex_unlock(&MUTEX);
+                        return 1;
+                    }
+
+                // Both sides are full.
+                case 3:
+                    iter->ID = -1;
+                    cout << "Freed for thread " << tid << endl;
+                    fsync(STDOUT_FILENO);
+                    print();
+                    pthread_mutex_unlock(&MUTEX);
+                    return 1;
+
+                // Left side is full.
+                case 4:
+                    next->SIZE += iter->SIZE;
+                    next->INDEX = iter->INDEX;
+                    previous->next = next;
+                    next->prev = previous;
+                    delete iter;
+                    cout << "Freed for thread " << tid << endl;
+                    fsync(STDOUT_FILENO);
+                    print();
+                    pthread_mutex_unlock(&MUTEX);
+                    return 1;
+
+                // Right side is full.
+                case 5:
+                    previous->SIZE += iter->SIZE;
+                    previous->next = next;
+                    next->prev = previous;
+                    delete iter;
+                    cout << "Freed for thread " << tid << endl;
+                    fsync(STDOUT_FILENO);
+                    print();
+                    pthread_mutex_unlock(&MUTEX);
+                    return 1;
+
+                // Both sides are empty.
+                case 6:
+                    // Coalesce into right.
+                    Node* next_buf = iter->next;
+                    next->SIZE += iter->SIZE;
+                    next->INDEX = iter->INDEX;
+                    previous->next = next;
+                    next->prev = previous;
+                    delete iter;
+
+                    // Coalesce into left.
+                    previous->SIZE += next_buf->SIZE;
+                    previous->next = next_buf->next;
+                    delete next_buf;
+
+                    cout << "Freed for thread " << tid << endl;
+                    fsync(STDOUT_FILENO);
+                    print();
+                    pthread_mutex_unlock(&MUTEX);
+                    return 1;
+            }
+        }
+
+        else
+        {
+            iter = iter->next;
+        }
+    }
+
     fsync(STDOUT_FILENO);
     pthread_mutex_unlock(&MUTEX);
-    return 0;
+    return -1;
 }
 
 int HeapManager::initHeap(size_t mem_size)
