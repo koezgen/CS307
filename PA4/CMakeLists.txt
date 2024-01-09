@@ -7,6 +7,7 @@ find_package(Threads REQUIRED)
 
 add_executable(PA4
         main.cpp
+        main.cpp
 )
 
 target_link_libraries(PA4 Threads::Threads)
